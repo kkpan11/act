@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/docker/go-connections/nat"
@@ -309,11 +310,17 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				return fmt.Errorf("failed to parse service %s ports: %w", serviceID, err)
 			}
 
+			imageName := rc.ExprEval.Interpolate(ctx, spec.Image)
+			if imageName == "" {
+				logger.Infof("The service '%s' will not be started because the container definition has an empty image.", serviceID)
+				continue
+			}
+
 			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
 			c := container.NewContainer(&container.NewContainerInput{
 				Name:           serviceContainerName,
 				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-				Image:          rc.ExprEval.Interpolate(ctx, spec.Image),
+				Image:          imageName,
 				Username:       username,
 				Password:       password,
 				Env:            envs,
@@ -962,10 +969,15 @@ func setActionRuntimeVars(rc *RunContext, env map[string]string) {
 		actionsRuntimeURL = fmt.Sprintf("http://%s:%s/", rc.Config.ArtifactServerAddr, rc.Config.ArtifactServerPort)
 	}
 	env["ACTIONS_RUNTIME_URL"] = actionsRuntimeURL
+	env["ACTIONS_RESULTS_URL"] = actionsRuntimeURL
 
 	actionsRuntimeToken := os.Getenv("ACTIONS_RUNTIME_TOKEN")
 	if actionsRuntimeToken == "" {
-		actionsRuntimeToken = "token"
+		runID := int64(1)
+		if rid, ok := rc.Config.Env["GITHUB_RUN_ID"]; ok {
+			runID, _ = strconv.ParseInt(rid, 10, 64)
+		}
+		actionsRuntimeToken, _ = common.CreateAuthorizationToken(runID, runID, runID)
 	}
 	env["ACTIONS_RUNTIME_TOKEN"] = actionsRuntimeToken
 }
