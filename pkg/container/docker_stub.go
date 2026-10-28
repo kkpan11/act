@@ -4,11 +4,11 @@ package container
 
 import (
 	"context"
+	"errors"
 	"runtime"
 
-	"github.com/docker/docker/api/types"
+	"github.com/moby/moby/api/types/system"
 	"github.com/nektos/act/pkg/common"
-	"github.com/pkg/errors"
 )
 
 // ImageExistsLocally returns a boolean indicating if an image with the
@@ -46,8 +46,8 @@ func RunnerArch(ctx context.Context) string {
 	return runtime.GOOS
 }
 
-func GetHostInfo(ctx context.Context) (info types.Info, err error) {
-	return types.Info{}, nil
+func GetHostInfo(ctx context.Context) (info system.Info, err error) {
+	return system.Info{}, nil
 }
 
 func NewDockerVolumeRemoveExecutor(volume string, force bool) common.Executor {

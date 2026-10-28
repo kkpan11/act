@@ -5,7 +5,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - shell: ${{ env.MY_SHELL }}
+      - shell: bash
         run: |
           if [[ -n "$BASH" ]]; then
             echo "I'm $BASH!"
@@ -14,9 +14,9 @@ jobs:
           fi
   check-container:
     runs-on: ubuntu-latest
-    container: node:16-buster-slim
+    container: node:24-bookworm-slim
     steps:
-      - shell: ${{ env.MY_SHELL }}
+      - shell: bash
         run: |
           if [[ -n "$BASH" ]]; then
             echo "I'm $BASH!"

@@ -1,6 +1,8 @@
 package artifactcache
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +26,7 @@ import (
 )
 
 const (
-	urlBase = "/_apis/artifactcache"
+	apiPath = "/_apis/artifactcache"
 )
 
 type Handler struct {
@@ -38,10 +40,12 @@ type Handler struct {
 	gcing atomic.Bool
 	gcAt  time.Time
 
-	outboundIP string
+	outboundIP        string
+	customExternalURL string
+	token             string
 }
 
-func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger) (*Handler, error) {
+func StartHandler(dir, customExternalURL string, outboundIP string, port uint16, logger logrus.FieldLogger) (*Handler, error) {
 	h := &Handler{}
 
 	if logger == nil {
@@ -71,6 +75,10 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 	}
 	h.storage = storage
 
+	if customExternalURL != "" {
+		h.customExternalURL = customExternalURL
+	}
+
 	if outboundIP != "" {
 		h.outboundIP = outboundIP
 	} else if ip := common.GetOutboundIP(); ip == nil {
@@ -79,28 +87,36 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 		h.outboundIP = ip.String()
 	}
 
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("generate auth token: %w", err)
+	}
+	h.token = hex.EncodeToString(tokenBytes)
+
 	router := httprouter.New()
-	router.GET(urlBase+"/cache", h.middleware(h.find))
-	router.POST(urlBase+"/caches", h.middleware(h.reserve))
-	router.PATCH(urlBase+"/caches/:id", h.middleware(h.upload))
-	router.POST(urlBase+"/caches/:id", h.middleware(h.commit))
-	router.GET(urlBase+"/artifacts/:id", h.middleware(h.get))
-	router.POST(urlBase+"/clean", h.middleware(h.clean))
+	base := "/" + h.token + apiPath
+	router.GET(base+"/cache", h.middleware(h.find))
+	router.POST(base+"/caches", h.middleware(h.reserve))
+	router.PATCH(base+"/caches/:id", h.middleware(h.upload))
+	router.POST(base+"/caches/:id", h.middleware(h.commit))
+	router.GET(base+"/artifacts/:id", h.middleware(h.get))
+	router.POST(base+"/clean", h.middleware(h.clean))
 
 	h.router = router
 
 	h.gcCache()
 
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port)) // listen on all interfaces
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", h.outboundIP, port))
 	if err != nil {
 		return nil, err
 	}
+
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
 		Handler:           router,
 	}
 	go func() {
-		if err := server.Serve(listener); err != nil && errors.Is(err, net.ErrClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			logger.Errorf("http serve: %v", err)
 		}
 	}()
@@ -110,11 +126,15 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 	return h, nil
 }
 
+func (h *Handler) GetActualPort() int {
+	return h.listener.Addr().(*net.TCPAddr).Port
+}
+
 func (h *Handler) ExternalURL() string {
-	// TODO: make the external url configurable if necessary
-	return fmt.Sprintf("http://%s:%d",
-		h.outboundIP,
-		h.listener.Addr().(*net.TCPAddr).Port)
+	if h.customExternalURL != "" {
+		return h.customExternalURL + "/" + h.token
+	}
+	return fmt.Sprintf("http://%s:%d/%s", h.outboundIP, h.GetActualPort(), h.token)
 }
 
 func (h *Handler) Close() error {
@@ -190,7 +210,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	h.responseJSON(w, r, 200, map[string]any{
 		"result":          "hit",
-		"archiveLocation": fmt.Sprintf("%s%s/artifacts/%d", h.ExternalURL(), urlBase, cache.ID),
+		"archiveLocation": fmt.Sprintf("%s%s/artifacts/%d", h.ExternalURL(), apiPath, cache.ID),
 		"cacheKey":        cache.Key,
 	})
 }
@@ -227,7 +247,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 
 // PATCH /_apis/artifactcache/caches/:id
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
+	id, err := strconv.ParseUint(params.ByName("id"), 10, 64)
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
 		return
@@ -261,6 +281,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 	}
 	if err := h.storage.Write(cache.ID, start, r.Body); err != nil {
 		h.responseJSON(w, r, 500, err)
+		return
 	}
 	h.useCache(id)
 	h.responseJSON(w, r, 200)
@@ -323,13 +344,13 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 
 // GET /_apis/artifactcache/artifacts/:id
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
+	id, err := strconv.ParseUint(params.ByName("id"), 10, 64)
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
 		return
 	}
 	h.useCache(id)
-	h.storage.Serve(w, r, uint64(id))
+	h.storage.Serve(w, r, id)
 }
 
 // POST /_apis/artifactcache/clean
@@ -394,7 +415,7 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 	return nil
 }
 
-func (h *Handler) useCache(id int64) {
+func (h *Handler) useCache(id uint64) {
 	db, err := h.openDB()
 	if err != nil {
 		return

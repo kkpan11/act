@@ -94,7 +94,7 @@ func newMutexExecutor(executor common.Executor) common.Executor {
 
 func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkflow, targetDirectory string) common.Executor {
 	return common.NewConditionalExecutor(
-		func(ctx context.Context) bool {
+		func(_ context.Context) bool {
 			_, err := os.Stat(targetDirectory)
 			notExists := errors.Is(err, fs.ErrNotExist)
 			return notExists
@@ -115,7 +115,7 @@ func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkfl
 
 func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow string) common.Executor {
 	return func(ctx context.Context) error {
-		planner, err := model.NewWorkflowPlanner(path.Join(directory, workflow), true)
+		planner, err := model.NewWorkflowPlanner(path.Join(directory, workflow), true, false)
 		if err != nil {
 			return err
 		}

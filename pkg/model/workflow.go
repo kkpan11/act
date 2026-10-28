@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nektos/act/pkg/common"
+	"github.com/nektos/act/pkg/schema"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -66,6 +68,40 @@ func (w *Workflow) OnEvent(event string) interface{} {
 	return nil
 }
 
+func (w *Workflow) UnmarshalYAML(node *yaml.Node) error {
+	// Resolve yaml anchor aliases first
+	if err := resolveAliases(node); err != nil {
+		return err
+	}
+	// Validate the schema before deserializing it into our model
+	if err := (&schema.Node{
+		Definition: "workflow-root",
+		Schema:     schema.GetWorkflowSchema(),
+	}).UnmarshalYAML(node); err != nil {
+		return errors.Join(err, fmt.Errorf("Actions YAML Schema Validation Error detected:\nFor more information, see: https://nektosact.com/usage/schema.html"))
+	}
+	type WorkflowDefault Workflow
+	return node.Decode((*WorkflowDefault)(w))
+}
+
+type WorkflowStrict Workflow
+
+func (w *WorkflowStrict) UnmarshalYAML(node *yaml.Node) error {
+	// Resolve yaml anchor aliases first
+	if err := resolveAliases(node); err != nil {
+		return err
+	}
+	// Validate the schema before deserializing it into our model
+	if err := (&schema.Node{
+		Definition: "workflow-root-strict",
+		Schema:     schema.GetWorkflowSchema(),
+	}).UnmarshalYAML(node); err != nil {
+		return errors.Join(err, fmt.Errorf("Actions YAML Strict Schema Validation Error detected:\nFor more information, see: https://nektosact.com/usage/schema.html"))
+	}
+	type WorkflowDefault Workflow
+	return node.Decode((*WorkflowDefault)(w))
+}
+
 type WorkflowDispatchInput struct {
 	Description string   `yaml:"description"`
 	Required    bool     `yaml:"required"`
@@ -116,10 +152,10 @@ func (w *Workflow) WorkflowDispatchConfig() *WorkflowDispatch {
 }
 
 type WorkflowCallInput struct {
-	Description string `yaml:"description"`
-	Required    bool   `yaml:"required"`
-	Default     string `yaml:"default"`
-	Type        string `yaml:"type"`
+	Description string    `yaml:"description"`
+	Required    bool      `yaml:"required"`
+	Default     yaml.Node `yaml:"default"`
+	Type        string    `yaml:"type"`
 }
 
 type WorkflowCallOutput struct {
@@ -362,8 +398,6 @@ func (j *Job) Matrix() map[string][]interface{} {
 
 // GetMatrixes returns the matrix cross product
 // It skips includes and hard fails excludes for non-existing keys
-//
-//nolint:gocyclo
 func (j *Job) GetMatrixes() ([]map[string]interface{}, error) {
 	matrixes := make([]map[string]interface{}, 0)
 	if j.Strategy != nil {
@@ -378,31 +412,11 @@ func (j *Job) GetMatrixes() ([]map[string]interface{}, error) {
 				case []interface{}:
 					for _, i := range t {
 						i := i.(map[string]interface{})
-						extraInclude := true
-						for k := range i {
-							if _, ok := m[k]; ok {
-								includes = append(includes, i)
-								extraInclude = false
-								break
-							}
-						}
-						if extraInclude {
-							extraIncludes = append(extraIncludes, i)
-						}
+						includes = append(includes, i)
 					}
 				case interface{}:
 					v := v.(map[string]interface{})
-					extraInclude := true
-					for k := range v {
-						if _, ok := m[k]; ok {
-							includes = append(includes, v)
-							extraInclude = false
-							break
-						}
-					}
-					if extraInclude {
-						extraIncludes = append(extraIncludes, v)
-					}
+					includes = append(includes, v)
 				}
 			}
 			delete(m, "include")
@@ -553,12 +567,14 @@ type ContainerSpec struct {
 
 // Step is the structure of one step in a job
 type Step struct {
-	ID                 string            `yaml:"id"`
-	If                 yaml.Node         `yaml:"if"`
-	Name               string            `yaml:"name"`
-	Uses               string            `yaml:"uses"`
-	Run                string            `yaml:"run"`
-	WorkingDirectory   string            `yaml:"working-directory"`
+	ID               string    `yaml:"id"`
+	If               yaml.Node `yaml:"if"`
+	Name             string    `yaml:"name"`
+	Uses             string    `yaml:"uses"`
+	Run              string    `yaml:"run"`
+	WorkingDirectory string    `yaml:"working-directory"`
+	// WorkflowShell is the shell really configured in the job, directly at step level or higher in defaults.run.shell
+	WorkflowShell      string            `yaml:"-"`
 	Shell              string            `yaml:"shell"`
 	Env                yaml.Node         `yaml:"env"`
 	With               map[string]string `yaml:"with"`
@@ -601,8 +617,14 @@ func (s *Step) ShellCommand() string {
 
 	//Reference: https://github.com/actions/runner/blob/8109c962f09d9acc473d92c595ff43afceddb347/src/Runner.Worker/Handlers/ScriptHandlerHelpers.cs#L9-L17
 	switch s.Shell {
-	case "", "bash":
-		shellCommand = "bash --noprofile --norc -e -o pipefail {0}"
+	case "":
+		shellCommand = "bash -e {0}"
+	case "bash":
+		if s.WorkflowShell == "" {
+			shellCommand = "bash -e {0}"
+		} else {
+			shellCommand = "bash --noprofile --norc -e -o pipefail {0}"
+		}
 	case "pwsh":
 		shellCommand = "pwsh -command . '{0}'"
 	case "python":
@@ -689,7 +711,12 @@ func (s *Step) Type() StepType {
 }
 
 // ReadWorkflow returns a list of jobs for a given workflow file reader
-func ReadWorkflow(in io.Reader) (*Workflow, error) {
+func ReadWorkflow(in io.Reader, strict bool) (*Workflow, error) {
+	if strict {
+		w := new(WorkflowStrict)
+		err := yaml.NewDecoder(in).Decode(w)
+		return (*Workflow)(w), err
+	}
 	w := new(Workflow)
 	err := yaml.NewDecoder(in).Decode(w)
 	return w, err

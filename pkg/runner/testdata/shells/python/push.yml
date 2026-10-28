@@ -5,15 +5,15 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - shell: ${{ env.MY_SHELL }}
+      - shell: python
         run: |
           import platform
           print(platform.python_version())
   check-container:
     runs-on: ubuntu-latest
-    container: node:16-buster
+    container: python:3.13-slim-bookworm
     steps:
-      - shell: ${{ env.MY_SHELL }}
+      - shell: python
         run: |
           import platform
           print(platform.python_version())

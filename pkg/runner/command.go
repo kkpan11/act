@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/nektos/act/pkg/common"
+
+	"github.com/sirupsen/logrus"
 )
 
 var commandPatternGA *regexp.Regexp
@@ -41,40 +43,49 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 		}
 
 		if resumeCommand != "" && command != resumeCommand {
-			logger.Infof("  \U00002699  %s", line)
+			logger.WithFields(logrus.Fields{"command": "ignored", "raw": line}).Infof("  \U00002699  %s", line)
 			return false
 		}
 		arg = unescapeCommandData(arg)
 		kvPairs = unescapeKvPairs(kvPairs)
+		defCommandLogger := logger.WithFields(logrus.Fields{"command": command, "kvPairs": kvPairs, "arg": arg, "raw": line})
 		switch command {
 		case "set-env":
+			if rc.Env["ACTIONS_ALLOW_UNSECURE_COMMANDS"] != "true" {
+				defCommandLogger.Errorf("The `set-env` command is disabled. Please upgrade to using Environment Files or opt into unsafe commands by setting the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment variable to `true`.")
+				break
+			}
 			rc.setEnv(ctx, kvPairs, arg)
 		case "set-output":
 			rc.setOutput(ctx, kvPairs, arg)
 		case "add-path":
+			if rc.Env["ACTIONS_ALLOW_UNSECURE_COMMANDS"] != "true" {
+				defCommandLogger.Errorf("The `add-path` command is disabled. Please upgrade to using Environment Files or opt into unsafe commands by setting the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment variable to `true`.")
+				break
+			}
 			rc.addPath(ctx, arg)
 		case "debug":
-			logger.Infof("  \U0001F4AC  %s", line)
+			defCommandLogger.Debugf("  \U0001F4AC  %s", line)
 		case "warning":
-			logger.Infof("  \U0001F6A7  %s", line)
+			defCommandLogger.Warnf("  \U0001F6A7  %s", line)
 		case "error":
-			logger.Infof("  \U00002757  %s", line)
+			defCommandLogger.Errorf("  \U00002757  %s", line)
 		case "add-mask":
 			rc.AddMask(arg)
-			logger.Infof("  \U00002699  %s", "***")
+			defCommandLogger.Infof("  \U00002699  %s", "***")
 		case "stop-commands":
 			resumeCommand = arg
-			logger.Infof("  \U00002699  %s", line)
+			defCommandLogger.Infof("  \U00002699  %s", line)
 		case resumeCommand:
 			resumeCommand = ""
-			logger.Infof("  \U00002699  %s", line)
+			defCommandLogger.Infof("  \U00002699  %s", line)
 		case "save-state":
-			logger.Infof("  \U0001f4be  %s", line)
+			defCommandLogger.Infof("  \U0001f4be  %s", line)
 			rc.saveState(ctx, kvPairs, arg)
 		case "add-matcher":
-			logger.Infof("  \U00002753 add-matcher %s", arg)
+			defCommandLogger.Infof("  \U00002753 add-matcher %s", arg)
 		default:
-			logger.Infof("  \U00002753  %s", line)
+			defCommandLogger.Infof("  \U00002753  %s", line)
 		}
 
 		return false
@@ -83,7 +94,7 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 
 func (rc *RunContext) setEnv(ctx context.Context, kvPairs map[string]string, arg string) {
 	name := kvPairs["name"]
-	common.Logger(ctx).Infof("  \U00002699  ::set-env:: %s=%s", name, arg)
+	common.Logger(ctx).WithFields(logrus.Fields{"command": "set-env", "name": name, "arg": arg}).Infof("  \U00002699  ::set-env:: %s=%s", name, arg)
 	if rc.Env == nil {
 		rc.Env = make(map[string]string)
 	}
@@ -115,11 +126,11 @@ func (rc *RunContext) setOutput(ctx context.Context, kvPairs map[string]string, 
 		return
 	}
 
-	logger.Infof("  \U00002699  ::set-output:: %s=%s", outputName, arg)
+	logger.WithFields(logrus.Fields{"command": "set-output", "name": outputName, "arg": arg}).Infof("  \U00002699  ::set-output:: %s=%s", outputName, arg)
 	result.Outputs[outputName] = arg
 }
 func (rc *RunContext) addPath(ctx context.Context, arg string) {
-	common.Logger(ctx).Infof("  \U00002699  ::add-path:: %s", arg)
+	common.Logger(ctx).WithFields(logrus.Fields{"command": "add-path", "arg": arg}).Infof("  \U00002699  ::add-path:: %s", arg)
 	extraPath := []string{arg}
 	for _, v := range rc.ExtraPath {
 		if v != arg {

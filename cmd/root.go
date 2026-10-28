@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,24 +16,44 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/adrg/xdg"
 	"github.com/andreaskoch/go-fswatch"
-	docker_container "github.com/docker/docker/api/types/container"
 	"github.com/joho/godotenv"
+	docker_container "github.com/moby/moby/api/types/container"
 	gitignore "github.com/sabhiram/go-gitignore"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/cobra/doc"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nektos/act/pkg/artifactcache"
 	"github.com/nektos/act/pkg/artifacts"
 	"github.com/nektos/act/pkg/common"
 	"github.com/nektos/act/pkg/container"
+	"github.com/nektos/act/pkg/gh"
 	"github.com/nektos/act/pkg/model"
 	"github.com/nektos/act/pkg/runner"
 )
 
+type Flag struct {
+	Name        string `json:"name"`
+	Default     string `json:"default"`
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
+
+var exitFunc = os.Exit
+
 // Execute is the entry point to running the CLI
 func Execute(ctx context.Context, version string) {
 	input := new(Input)
+	rootCmd := createRootCommand(ctx, input, version)
+
+	if err := rootCmd.Execute(); err != nil {
+		exitFunc(1)
+	}
+}
+
+func createRootCommand(ctx context.Context, input *Input, version string) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:               "act [event name to run] [flags]\n\nIf no event name passed, will default to \"on: push\"\nIf actions handles only one event it will be used as default instead of \"on: push\"",
 		Short:             "Run GitHub actions locally by specifying the event name (e.g. `push`) or an action name directly.",
@@ -42,11 +64,15 @@ func Execute(ctx context.Context, version string) {
 		Version:           version,
 		SilenceUsage:      true,
 	}
+
 	rootCmd.Flags().BoolP("watch", "w", false, "watch the contents of the local repo and run when files change")
+	rootCmd.Flags().BoolVar(&input.validate, "validate", false, "validate workflows")
+	rootCmd.Flags().BoolVar(&input.strict, "strict", false, "use strict workflow schema")
 	rootCmd.Flags().BoolP("list", "l", false, "list workflows")
 	rootCmd.Flags().BoolP("graph", "g", false, "draw workflows")
 	rootCmd.Flags().StringP("job", "j", "", "run a specific job ID")
 	rootCmd.Flags().BoolP("bug-report", "", false, "Display system information for bug report")
+	rootCmd.Flags().BoolP("man-page", "", false, "Print a generated manual page to stdout")
 
 	rootCmd.Flags().StringVar(&input.remoteName, "remote-name", "origin", "git remote name that will be used to retrieve url of git repo")
 	rootCmd.Flags().StringArrayVarP(&input.secrets, "secret", "s", []string{}, "secret to make available to actions with optional value (e.g. -s mysecret=foo or -s mysecret)")
@@ -78,7 +104,7 @@ func Execute(ctx context.Context, version string) {
 	rootCmd.PersistentFlags().BoolVar(&input.jsonLogger, "json", false, "Output logs in json format")
 	rootCmd.PersistentFlags().BoolVar(&input.logPrefixJobID, "log-prefix-job-id", false, "Output the job id within non-json logs instead of the entire name")
 	rootCmd.PersistentFlags().BoolVarP(&input.noOutput, "quiet", "q", false, "disable logging of output from steps")
-	rootCmd.PersistentFlags().BoolVarP(&input.dryrun, "dryrun", "n", false, "dryrun mode")
+	rootCmd.PersistentFlags().BoolVarP(&input.dryrun, "dryrun", "n", false, "disable container creation, validates only workflow correctness")
 	rootCmd.PersistentFlags().StringVarP(&input.secretfile, "secret-file", "", ".secrets", "file with list of secrets to read from (e.g. --secret-file .secrets)")
 	rootCmd.PersistentFlags().StringVarP(&input.varfile, "var-file", "", ".vars", "file with list of vars to read from (e.g. --var-file .vars)")
 	rootCmd.PersistentFlags().BoolVarP(&input.insecureSecrets, "insecure-secrets", "", false, "NOT RECOMMENDED! Doesn't hide secrets while printing logs.")
@@ -87,25 +113,25 @@ func Execute(ctx context.Context, version string) {
 	rootCmd.PersistentFlags().StringVarP(&input.containerArchitecture, "container-architecture", "", "", "Architecture which should be used to run containers, e.g.: linux/amd64. If not specified, will use host default architecture. Requires Docker server API Version 1.41+. Ignored on earlier Docker server platforms.")
 	rootCmd.PersistentFlags().StringVarP(&input.containerDaemonSocket, "container-daemon-socket", "", "", "URI to Docker Engine socket (e.g.: unix://~/.docker/run/docker.sock or - to disable bind mounting the socket)")
 	rootCmd.PersistentFlags().StringVarP(&input.containerOptions, "container-options", "", "", "Custom docker container options for the job container without an options property in the job definition")
-	rootCmd.PersistentFlags().StringVarP(&input.githubInstance, "github-instance", "", "github.com", "GitHub instance to use. Don't use this if you are not using GitHub Enterprise Server.")
+	rootCmd.PersistentFlags().StringVarP(&input.githubInstance, "github-instance", "", "github.com", "GitHub instance to use. Only use this when using GitHub Enterprise Server.")
 	rootCmd.PersistentFlags().StringVarP(&input.artifactServerPath, "artifact-server-path", "", "", "Defines the path where the artifact server stores uploads and retrieves downloads from. If not specified the artifact server will not start.")
-	rootCmd.PersistentFlags().StringVarP(&input.artifactServerAddr, "artifact-server-addr", "", common.GetOutboundIP().String(), "Defines the address to which the artifact server binds.")
+	rootCmd.PersistentFlags().StringVarP(&input.artifactServerAddr, "artifact-server-addr", "", "127.0.0.1", "Address the artifact server binds to. When omitted, Linux host-network jobs use 127.0.0.1 and every other container network uses the outbound address.")
 	rootCmd.PersistentFlags().StringVarP(&input.artifactServerPort, "artifact-server-port", "", "34567", "Defines the port where the artifact server listens.")
-	rootCmd.PersistentFlags().BoolVarP(&input.noSkipCheckout, "no-skip-checkout", "", false, "Do not skip actions/checkout")
+	rootCmd.PersistentFlags().BoolVarP(&input.noSkipCheckout, "no-skip-checkout", "", false, "Use actions/checkout instead of copying local files into container")
 	rootCmd.PersistentFlags().BoolVarP(&input.noCacheServer, "no-cache-server", "", false, "Disable cache server")
 	rootCmd.PersistentFlags().StringVarP(&input.cacheServerPath, "cache-server-path", "", filepath.Join(CacheHomeDir, "actcache"), "Defines the path where the cache server stores caches.")
+	rootCmd.PersistentFlags().StringVarP(&input.cacheServerExternalURL, "cache-server-external-url", "", "", "Defines the external URL for if the cache server is behind a proxy. e.g.: https://act-cache-server.example.com. Be careful that there is no trailing slash.")
 	rootCmd.PersistentFlags().StringVarP(&input.cacheServerAddr, "cache-server-addr", "", common.GetOutboundIP().String(), "Defines the address to which the cache server binds.")
 	rootCmd.PersistentFlags().Uint16VarP(&input.cacheServerPort, "cache-server-port", "", 0, "Defines the port where the artifact server listens. 0 means a randomly available port.")
 	rootCmd.PersistentFlags().StringVarP(&input.actionCachePath, "action-cache-path", "", filepath.Join(CacheHomeDir, "act"), "Defines the path where the actions get cached and host workspaces created.")
-	rootCmd.PersistentFlags().BoolVarP(&input.actionOfflineMode, "action-offline-mode", "", false, "If action contents exists, it will not be fetch and pull again. If turn on this,will turn off force pull")
+	rootCmd.PersistentFlags().BoolVarP(&input.actionOfflineMode, "action-offline-mode", "", false, "If action contents exists, it will not be fetch and pull again. If turn on this, will turn off force pull")
 	rootCmd.PersistentFlags().StringVarP(&input.networkName, "network", "", "host", "Sets a docker network name. Defaults to host.")
 	rootCmd.PersistentFlags().BoolVarP(&input.useNewActionCache, "use-new-action-cache", "", false, "Enable using the new Action Cache for storing Actions locally")
 	rootCmd.PersistentFlags().StringArrayVarP(&input.localRepository, "local-repository", "", []string{}, "Replaces the specified repository and ref with a local folder (e.g. https://github.com/test/test@v0=/home/act/test or test/test@v0=/home/act/test, the latter matches any hosts or protocols)")
+	rootCmd.PersistentFlags().BoolVar(&input.listOptions, "list-options", false, "Print a json structure of compatible options")
+	rootCmd.PersistentFlags().IntVar(&input.concurrentJobs, "concurrent-jobs", 0, "Maximum number of concurrent jobs to run. Default is the number of CPUs available.")
 	rootCmd.SetArgs(args())
-
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 // Return locations where Act's config can be found in order: XDG spec, .actrc in HOME directory, .actrc in invocation directory
@@ -227,6 +253,28 @@ func bugReport(ctx context.Context, version string) error {
 	return nil
 }
 
+func generateManPage(cmd *cobra.Command) error {
+	header := &doc.GenManHeader{
+		Title:   "act",
+		Section: "1",
+		Source:  fmt.Sprintf("act %s", cmd.Version),
+	}
+	buf := new(bytes.Buffer)
+	cobra.CheckErr(doc.GenMan(cmd, header, buf))
+	fmt.Print(buf.String())
+	return nil
+}
+
+func listOptions(cmd *cobra.Command) error {
+	flags := []Flag{}
+	cmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		flags = append(flags, Flag{Name: f.Name, Default: f.DefValue, Description: f.Usage, Type: f.Value.Type()})
+	})
+	a, err := json.Marshal(flags)
+	fmt.Println(string(a))
+	return err
+}
+
 func readArgsFile(file string, split bool) []string {
 	args := make([]string, 0)
 	f, err := os.Open(file)
@@ -240,6 +288,7 @@ func readArgsFile(file string, split bool) []string {
 		}
 	}()
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(nil, 1024*1024*1024) // increase buffer to 1GB to avoid scanner buffer overflow
 	for scanner.Scan() {
 		arg := os.ExpandEnv(strings.TrimSpace(scanner.Text()))
 
@@ -263,7 +312,7 @@ func setup(_ *Input) func(*cobra.Command, []string) {
 }
 
 func cleanup(inputs *Input) func(*cobra.Command, []string) {
-	return func(cmd *cobra.Command, _ []string) {
+	return func(_ *cobra.Command, _ []string) {
 		displayNotices(inputs)
 	}
 }
@@ -294,6 +343,10 @@ func readYamlFile(file string) (map[string]string, error) {
 }
 
 func readEnvs(path string, envs map[string]string) bool {
+	return readEnvsEx(path, envs, false)
+}
+
+func readEnvsEx(path string, envs map[string]string, caseInsensitive bool) bool {
 	if _, err := os.Stat(path); err == nil {
 		var env map[string]string
 		if ext := filepath.Ext(path); ext == ".yml" || ext == ".yaml" {
@@ -305,6 +358,9 @@ func readEnvs(path string, envs map[string]string) bool {
 			log.Fatalf("Error loading from %s: %v", path, err)
 		}
 		for k, v := range env {
+			if caseInsensitive {
+				k = strings.ToUpper(k)
+			}
 			if _, ok := envs[k]; !ok {
 				envs[k] = v
 			}
@@ -339,8 +395,17 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		if ok, _ := cmd.Flags().GetBool("bug-report"); ok {
+			ctx, cancel := common.EarlyCancelContext(ctx)
+			defer cancel()
 			return bugReport(ctx, cmd.Version)
 		}
+		if ok, _ := cmd.Flags().GetBool("man-page"); ok {
+			return generateManPage(cmd)
+		}
+		if input.listOptions {
+			return listOptions(cmd)
+		}
+
 		if ret, err := container.GetSocketAndHost(input.containerDaemonSocket); err != nil {
 			log.Warnf("Couldn't get a valid docker connection: %+v", err)
 		} else {
@@ -368,7 +433,13 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 
 		log.Debugf("Loading secrets from %s", input.Secretfile())
 		secrets := newSecrets(input.secrets)
-		_ = readEnvs(input.Secretfile(), secrets)
+		_ = readEnvsEx(input.Secretfile(), secrets, true)
+
+		if _, hasGitHubToken := secrets["GITHUB_TOKEN"]; !hasGitHubToken {
+			ctx, cancel := common.EarlyCancelContext(ctx)
+			defer cancel()
+			secrets["GITHUB_TOKEN"], _ = gh.GetToken(ctx, "")
+		}
 
 		log.Debugf("Loading vars from %s", input.Varfile())
 		vars := newSecrets(input.vars)
@@ -377,7 +448,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		matrixes := parseMatrix(input.matrix)
 		log.Debugf("Evaluated matrix inclusions: %v", matrixes)
 
-		planner, err := model.NewWorkflowPlanner(input.WorkflowsPath(), input.noWorkflowRecurse)
+		planner, err := model.NewWorkflowPlanner(input.WorkflowsPath(), input.noWorkflowRecurse, input.strict)
 		if err != nil {
 			return err
 		}
@@ -390,6 +461,11 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		// check if we should just list the workflows
 		list, err := cmd.Flags().GetBool("list")
 		if err != nil {
+			return err
+		}
+
+		// check if we should just validate the workflows
+		if input.validate {
 			return err
 		}
 
@@ -479,6 +555,11 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Debugf("Planning jobs for event: %s", eventName)
 			plan, plannerErr = planner.PlanEvent(eventName)
 		}
+		if plan != nil {
+			if len(plan.Stages) == 0 {
+				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
+			}
+		}
 		if plan == nil && plannerErr != nil {
 			return plannerErr
 		}
@@ -521,6 +602,11 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
 		}
 
+		artifactAddr, artifactServerAuthKey, err := prepareArtifactServer(cmd, input, plan)
+		if err != nil {
+			return err
+		}
+
 		// run the plan
 		config := &runner.Config{
 			Actor:                              input.actor,
@@ -555,14 +641,16 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			ContainerCapDrop:                   input.containerCapDrop,
 			AutoRemove:                         input.autoRemove,
 			ArtifactServerPath:                 input.artifactServerPath,
-			ArtifactServerAddr:                 input.artifactServerAddr,
+			ArtifactServerAddr:                 artifactAddr,
 			ArtifactServerPort:                 input.artifactServerPort,
+			ArtifactServerAuthKey:              artifactServerAuthKey,
 			NoSkipCheckout:                     input.noSkipCheckout,
 			RemoteName:                         input.remoteName,
 			ReplaceGheActionWithGithubCom:      input.replaceGheActionWithGithubCom,
 			ReplaceGheActionTokenWithGithubCom: input.replaceGheActionTokenWithGithubCom,
 			Matrix:                             matrixes,
 			ContainerNetworkMode:               docker_container.NetworkMode(input.networkName),
+			ConcurrentJobs:                     input.concurrentJobs,
 		}
 		if input.useNewActionCache || len(input.localRepository) > 0 {
 			if input.actionOfflineMode {
@@ -594,13 +682,13 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
-		cancel := artifacts.Serve(ctx, input.artifactServerPath, input.artifactServerAddr, input.artifactServerPort)
+		cancel := artifacts.Serve(ctx, input.artifactServerPath, artifactAddr, input.artifactServerPort, artifactServerAuthKey)
 
 		const cacheURLKey = "ACTIONS_CACHE_URL"
 		var cacheHandler *artifactcache.Handler
 		if !input.noCacheServer && envs[cacheURLKey] == "" {
 			var err error
-			cacheHandler, err = artifactcache.StartHandler(input.cacheServerPath, input.cacheServerAddr, input.cacheServerPort, common.Logger(ctx))
+			cacheHandler, err = artifactcache.StartHandler(input.cacheServerPath, input.cacheServerExternalURL, input.cacheServerAddr, input.cacheServerPort, common.Logger(ctx))
 			if err != nil {
 				return err
 			}
@@ -618,7 +706,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return plannerErr
 		}
 
-		executor := r.NewPlanExecutor(plan).Finally(func(ctx context.Context) error {
+		executor := r.NewPlanExecutor(plan).Finally(func(_ context.Context) error {
 			cancel()
 			_ = cacheHandler.Close()
 			return nil
@@ -631,10 +719,44 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 	}
 }
 
+func prepareArtifactServer(cmd *cobra.Command, input *Input, plan *model.Plan) (string, []byte, error) {
+	if input.artifactServerPath == "" {
+		return input.artifactServerAddr, nil, nil
+	}
+	key, err := artifacts.NewAuthKey()
+	if err != nil {
+		return "", nil, err
+	}
+	explicit := cmd != nil && cmd.PersistentFlags().Changed("artifact-server-addr")
+	addr := artifacts.ListenAddress(runtime.GOOS, input.networkName, planHasServiceContainers(plan), input.artifactServerAddr, explicit)
+	return addr, key, nil
+}
+
+func planHasServiceContainers(plan *model.Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, stage := range plan.Stages {
+		if stage == nil {
+			continue
+		}
+		for _, run := range stage.Runs {
+			if run == nil || run.Workflow == nil {
+				continue
+			}
+			job := run.Job()
+			if job != nil && len(job.Services) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func defaultImageSurvey(actrc string) error {
 	var answer string
 	confirmation := &survey.Select{
-		Message: "Please choose the default image you want to use with act:\n  - Large size image: ca. 17GB download + 53.1GB storage, you will need 75GB of free disk space, snapshots of GitHub Hosted Runners without snap and pulled docker images\n  - Medium size image: ~500MB, includes only necessary tools to bootstrap actions and aims to be compatible with most actions\n  - Micro size image: <200MB, contains only NodeJS required to bootstrap actions, doesn't work with all actions\n\nDefault image and other options can be changed manually in ~/.actrc (please refer to https://github.com/nektos/act#configuration for additional information about file structure)",
+		Message: "Please choose the default image you want to use with act:\n  - Large size image: ca. 17GB download + 53.1GB storage, you will need 75GB of free disk space, snapshots of GitHub Hosted Runners without snap and pulled docker images\n  - Medium size image: ~500MB, includes only necessary tools to bootstrap actions and aims to be compatible with most actions\n  - Micro size image: <200MB, contains only NodeJS required to bootstrap actions, doesn't work with all actions\n\nDefault image and other options can be changed manually in " + configLocations()[0] + " (please refer to https://nektosact.com/usage/index.html?highlight=configur#configuration-file for additional information about file structure)",
 		Help:    "If you want to know why act asks you that, please go to https://github.com/nektos/act/issues/107",
 		Default: "Medium",
 		Options: []string{"Large", "Medium", "Micro"},
@@ -704,10 +826,13 @@ func watchAndRun(ctx context.Context, fn common.Executor) error {
 		return err
 	}
 
+	earlyCancelCtx, cancel := common.EarlyCancelContext(ctx)
+	defer cancel()
+
 	for folderWatcher.IsRunning() {
 		log.Debugf("Watching %s for changes", dir)
 		select {
-		case <-ctx.Done():
+		case <-earlyCancelCtx.Done():
 			return nil
 		case changes := <-folderWatcher.ChangeDetails():
 			log.Debugf("%s", changes.String())

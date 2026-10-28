@@ -13,6 +13,7 @@ type GithubContext struct {
 	Event            map[string]interface{} `json:"event"`
 	EventPath        string                 `json:"event_path"`
 	Workflow         string                 `json:"workflow"`
+	RunAttempt       string                 `json:"run_attempt"`
 	RunID            string                 `json:"run_id"`
 	RunNumber        string                 `json:"run_number"`
 	Actor            string                 `json:"actor"`
@@ -62,9 +63,9 @@ func nestedMapLookup(m map[string]interface{}, ks ...string) (rval interface{}) 
 		return rval
 	} else if m, ok = rval.(map[string]interface{}); !ok {
 		return nil
-	} else { // 1+ more keys
-		return nestedMapLookup(m, ks[1:]...)
 	}
+	// 1+ more keys
+	return nestedMapLookup(m, ks[1:]...)
 }
 
 func withDefaultBranch(ctx context.Context, b string, event map[string]interface{}) map[string]interface{} {
@@ -168,7 +169,10 @@ func (ghc *GithubContext) SetRepositoryAndOwner(ctx context.Context, githubInsta
 	if ghc.Repository == "" {
 		repo, err := git.FindGithubRepo(ctx, repoPath, githubInstance, remoteName)
 		if err != nil {
-			common.Logger(ctx).Warningf("unable to get git repo (githubInstance: %v; remoteName: %v, repoPath: %v): %v", githubInstance, remoteName, repoPath, err)
+			common.Logger(ctx).Debugf("unable to get git repo (githubInstance: %v; remoteName: %v, repoPath: %v): %v", githubInstance, remoteName, repoPath, err)
+			// nektos/act is used as a default action, so why not a repo?
+			ghc.Repository = "nektos/act"
+			ghc.RepositoryOwner = strings.Split(ghc.Repository, "/")[0]
 			return
 		}
 		ghc.Repository = repo

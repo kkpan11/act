@@ -46,6 +46,7 @@ type Input struct {
 	artifactServerPort                 string
 	noCacheServer                      bool
 	cacheServerPath                    string
+	cacheServerExternalURL             string
 	cacheServerAddr                    string
 	cacheServerPort                    uint16
 	jsonLogger                         bool
@@ -60,6 +61,10 @@ type Input struct {
 	networkName                        string
 	useNewActionCache                  bool
 	localRepository                    []string
+	listOptions                        bool
+	validate                           bool
+	strict                             bool
+	concurrentJobs                     int
 }
 
 func (i *Input) resolve(path string) string {

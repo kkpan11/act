@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"runtime"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/nektos/act/pkg/common"
 	"github.com/nektos/act/pkg/exprparser"
 	"github.com/nektos/act/pkg/model"
 
@@ -154,7 +158,6 @@ func TestRunContext_EvalBool(t *testing.T) {
 
 	updateTestIfWorkflow(t, tables, rc)
 	for _, table := range tables {
-		table := table
 		t.Run(table.in, func(t *testing.T) {
 			assertObject := assert.New(t)
 			b, err := EvalBool(context.Background(), rc.ExprEval, table.in, exprparser.DefaultStatusCheckSuccess)
@@ -258,11 +261,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 	isWindows := runtime.GOOS == "windows"
 
 	for _, testcase := range tests {
-		// pin for scopelint
-		testcase := testcase
 		for _, bindWorkDir := range []bool{true, false} {
-			// pin for scopelint
-			bindWorkDir := bindWorkDir
 			testBindSuffix := ""
 			if bindWorkDir {
 				testBindSuffix = "Bind"
@@ -386,15 +385,15 @@ func TestGetGitHubContext(t *testing.T) {
 		owner = o
 	}
 
-	assert.Equal(t, ghc.RunID, "1")
-	assert.Equal(t, ghc.RunNumber, "1")
-	assert.Equal(t, ghc.RetentionDays, "0")
-	assert.Equal(t, ghc.Actor, actor)
-	assert.Equal(t, ghc.Repository, repo)
-	assert.Equal(t, ghc.RepositoryOwner, owner)
-	assert.Equal(t, ghc.RunnerPerflog, "/dev/null")
-	assert.Equal(t, ghc.Token, rc.Config.Secrets["GITHUB_TOKEN"])
-	assert.Equal(t, ghc.Job, "job1")
+	assert.Equal(t, "1", ghc.RunID)
+	assert.Equal(t, "1", ghc.RunNumber)
+	assert.Equal(t, "0", ghc.RetentionDays)
+	assert.Equal(t, actor, ghc.Actor)
+	assert.Equal(t, repo, ghc.Repository)
+	assert.Equal(t, owner, ghc.RepositoryOwner)
+	assert.Equal(t, "/dev/null", ghc.RunnerPerflog)
+	assert.Equal(t, rc.Config.Secrets["GITHUB_TOKEN"], ghc.Token)
+	assert.Equal(t, "job1", ghc.Job)
 }
 
 func TestGetGithubContextRef(t *testing.T) {
@@ -417,7 +416,6 @@ func TestGetGithubContextRef(t *testing.T) {
 	}
 
 	for _, data := range table {
-		data := data
 		t.Run(data.event, func(t *testing.T) {
 			rc := &RunContext{
 				EventJSON: data.json,
@@ -681,4 +679,67 @@ func TestRunContextGetEnv(t *testing.T) {
 			assert.EqualValues(t, test.want, envMap[test.targetEnv])
 		})
 	}
+}
+
+func TestSetRuntimeVariables(t *testing.T) {
+	rc := &RunContext{
+		Config: &Config{
+			ArtifactServerAddr:    "myhost",
+			ArtifactServerPort:    "8000",
+			ArtifactServerAuthKey: []byte("artifact server auth key"),
+		},
+	}
+	v := "http://myhost:8000/"
+	env := map[string]string{}
+	setActionRuntimeVars(rc, env)
+
+	assert.Equal(t, v, env["ACTIONS_RESULTS_URL"])
+	assert.Equal(t, v, env["ACTIONS_RUNTIME_URL"])
+	runtimeToken := env["ACTIONS_RUNTIME_TOKEN"]
+	assert.NotEmpty(t, v, runtimeToken)
+
+	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, jwt.MapClaims{})
+	assert.NotNil(t, tkn)
+	assert.Nil(t, err)
+
+	req := &http.Request{Header: http.Header{"Authorization": []string{"Bearer " + runtimeToken}}}
+	gotRunID, err := common.ValidateAuthorizationToken(rc.Config.ArtifactServerAuthKey, req)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), gotRunID)
+	_, err = common.ValidateAuthorizationToken([]byte("another key"), req)
+	assert.Error(t, err)
+}
+
+func TestSetRuntimeVariablesWithRunID(t *testing.T) {
+	rc := &RunContext{
+		Config: &Config{
+			ArtifactServerAddr:    "myhost",
+			ArtifactServerPort:    "8000",
+			ArtifactServerAuthKey: []byte("artifact server auth key"),
+			Env: map[string]string{
+				"GITHUB_RUN_ID": "45",
+			},
+		},
+	}
+	v := "http://myhost:8000/"
+	env := map[string]string{}
+	setActionRuntimeVars(rc, env)
+
+	assert.Equal(t, v, env["ACTIONS_RESULTS_URL"])
+	assert.Equal(t, v, env["ACTIONS_RUNTIME_URL"])
+	runtimeToken := env["ACTIONS_RUNTIME_TOKEN"]
+	assert.NotEmpty(t, v, runtimeToken)
+
+	claims := jwt.MapClaims{}
+	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, &claims)
+	assert.NotNil(t, tkn)
+	assert.Nil(t, err)
+	scp, ok := claims["scp"]
+	assert.True(t, ok, "scp claim exists")
+	assert.Equal(t, "Actions.Results:45:45", scp, "contains expected scp claim")
+
+	req := &http.Request{Header: http.Header{"Authorization": []string{"Bearer " + runtimeToken}}}
+	gotRunID, err := common.ValidateAuthorizationToken(rc.Config.ArtifactServerAuthKey, req)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(45), gotRunID)
 }

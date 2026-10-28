@@ -1,6 +1,6 @@
 ![act-logo](https://raw.githubusercontent.com/wiki/nektos/act/img/logo-150.png)
 
-# Overview [![push](https://github.com/nektos/act/workflows/push/badge.svg?branch=master&event=push)](https://github.com/nektos/act/actions) [![Join the chat at https://gitter.im/nektos/act](https://badges.gitter.im/nektos/act.svg)](https://gitter.im/nektos/act?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge) [![Go Report Card](https://goreportcard.com/badge/github.com/nektos/act)](https://goreportcard.com/report/github.com/nektos/act) [![awesome-runners](https://img.shields.io/badge/listed%20on-awesome--runners-blue.svg)](https://github.com/jonico/awesome-runners)
+# Overview [![push](https://github.com/nektos/act/workflows/push/badge.svg?branch=main&event=push)](https://github.com/nektos/act/actions) [![Go Report Card](https://goreportcard.com/badge/github.com/nektos/act)](https://goreportcard.com/report/github.com/nektos/act) [![awesome-runners](https://img.shields.io/badge/listed%20on-awesome--runners-blue.svg)](https://github.com/jonico/awesome-runners)
 
 > "Think globally, `act` locally"
 
@@ -8,6 +8,10 @@ Run your [GitHub Actions](https://developer.github.com/actions/) locally! Why wo
 
 - **Fast Feedback** - Rather than having to commit/push every time you want to test out the changes you are making to your `.github/workflows/` files (or for any changes to embedded GitHub actions), you can use `act` to run the actions locally. The [environment variables](https://help.github.com/en/actions/configuring-and-managing-workflows/using-environment-variables#default-environment-variables) and [filesystem](https://help.github.com/en/actions/reference/virtual-environments-for-github-hosted-runners#filesystems-on-github-hosted-runners) are all configured to match what GitHub provides.
 - **Local Task Runner** - I love [make](<https://en.wikipedia.org/wiki/Make_(software)>). However, I also hate repeating myself. With `act`, you can use the GitHub Actions defined in your `.github/workflows/` to replace your `Makefile`!
+
+> [!TIP]
+> **Now Manage and Run Act Directly From VS Code!**<br/>
+> Check out the [GitHub Local Actions](https://sanjulaganepola.github.io/github-local-actions-docs/) Visual Studio Code extension which allows you to leverage the power of `act` to run and test workflows locally without leaving your editor.
 
 # How Does It Work?
 
@@ -23,7 +27,7 @@ Please look at the [act user guide](https://nektosact.com) for more documentatio
 
 # Support
 
-Need help? Ask on [Gitter](https://gitter.im/nektos/act)!
+Need help? Ask in [discussions](https://github.com/nektos/act/discussions)!
 
 # Contributing
 
@@ -31,7 +35,8 @@ Want to contribute to act? Awesome! Check out the [contributing guidelines](CONT
 
 ## Manually building from source
 
-- Install Go tools 1.20+ - (<https://golang.org/doc/install>)
+- Install Go (version in `go.mod`, currently 1.26.0) - (<https://golang.org/doc/install>)
 - Clone this repo `git clone git@github.com:nektos/act.git`
-- Run unit tests with `make test`
+- Run unit tests with `make test` (requires Docker)
+- Run fast tests without Docker with `make test-fast`
 - Build and install: `make install`

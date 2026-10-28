@@ -252,25 +252,29 @@ func TestArtifactFlow(t *testing.T) {
 
 	ctx := context.Background()
 
-	cancel := Serve(ctx, artifactsPath, artifactsAddr, artifactsPort)
+	authKey, err := NewAuthKey()
+	assert.NoError(t, err)
+
+	cancel := Serve(ctx, artifactsPath, artifactsAddr, artifactsPort, authKey)
 	defer cancel()
 
 	platforms := map[string]string{
-		"ubuntu-latest": "node:16-buster", // Don't use node:16-buster-slim because it doesn't have curl command, which is used in the tests
+		"ubuntu-latest": "node:24-bookworm", // slim images do not include curl, which these tests run
 	}
 
 	tables := []TestJobFileInfo{
 		{"testdata", "upload-and-download", "push", "", platforms, ""},
 		{"testdata", "GHSL-2023-004", "push", "", platforms, ""},
+		{"testdata", "v4", "push", "", platforms, ""},
 	}
 	log.SetLevel(log.DebugLevel)
 
 	for _, table := range tables {
-		runTestJobFile(ctx, t, table)
+		runTestJobFile(ctx, t, table, authKey)
 	}
 }
 
-func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
+func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo, authKey []byte) {
 	t.Run(tjfi.workflowPath, func(t *testing.T) {
 		fmt.Printf("::group::%s\n", tjfi.workflowPath)
 
@@ -292,12 +296,13 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 			ArtifactServerPath:    artifactsPath,
 			ArtifactServerAddr:    artifactsAddr,
 			ArtifactServerPort:    artifactsPort,
+			ArtifactServerAuthKey: authKey,
 		}
 
 		runner, err := runner.New(runnerConfig)
 		assert.Nil(t, err, tjfi.workflowPath)
 
-		planner, err := model.NewWorkflowPlanner(fullWorkflowPath, true)
+		planner, err := model.NewWorkflowPlanner(fullWorkflowPath, true, false)
 		assert.Nil(t, err, fullWorkflowPath)
 
 		plan, err := planner.PlanEvent(tjfi.eventName)
@@ -316,9 +321,15 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 	})
 }
 
-func TestMkdirFsImplSafeResolve(t *testing.T) {
-	assert := assert.New(t)
+func TestArtifactWorkflowParses(t *testing.T) {
+	workflow, err := os.Open(filepath.Join("testdata", "GHSL-2023-004", "artifacts.yml"))
+	assert.NoError(t, err)
+	defer workflow.Close()
+	_, err = model.ReadWorkflow(workflow, false)
+	assert.NoError(t, err)
+}
 
+func TestMkdirFsImplSafeResolve(t *testing.T) {
 	baseDir := "/foo/bar"
 
 	tests := map[string]struct {
@@ -336,6 +347,7 @@ func TestMkdirFsImplSafeResolve(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
 			assert.Equal(tc.want, safeResolve(baseDir, tc.input))
 		})
 	}
@@ -358,13 +370,8 @@ func TestDownloadArtifactFileUnsafePath(t *testing.T) {
 
 	router.ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
-		assert.FailNow(fmt.Sprintf("Wrong status: %d", status))
-	}
-
-	data := rr.Body.Bytes()
-
-	assert.Equal("content", string(data))
+	assert.Equal(http.StatusBadRequest, rr.Code)
+	assert.NotContains(rr.Body.String(), "content")
 }
 
 func TestArtifactUploadBlobUnsafePath(t *testing.T) {
@@ -380,16 +387,7 @@ func TestArtifactUploadBlobUnsafePath(t *testing.T) {
 
 	router.ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
-		assert.Fail("Wrong status")
-	}
-
-	response := ResponseMessage{}
-	err := json.Unmarshal(rr.Body.Bytes(), &response)
-	if err != nil {
-		panic(err)
-	}
-
-	assert.Equal("success", response.Message)
-	assert.Equal("content", string(memfs["artifact/server/path/1/some/file"].Data))
+	assert.Equal(http.StatusBadRequest, rr.Code)
+	assert.NotContains(memfs, "artifact/server/path/1/some/file")
+	assert.NotContains(memfs, "artifact/server/path/some/file")
 }
